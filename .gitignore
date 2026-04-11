@@ -1,0 +1,7 @@
+*.mp4
+*.avi
+test-videos/
+__pycache__/
+.env
+*.onnx
+docs.txt
