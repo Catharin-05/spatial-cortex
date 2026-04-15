@@ -1,112 +1,108 @@
-import ollama
 import json
-import os
-from tools import search_event
+import ollama
+from typing import List, Dict
+from tools.detector import search_objects
+from tools.inspector import analyze_state
+from tools.tracker import count_unique_objects
+from tools.compare import check_progress
 
-# --- CONFIGURATION ---
-MODEL = "llama3.2"
+class SpatialCortexAgent:
+    def __init__(self, video_path: str, model: str = "llama3.2"):
+        self.video_path = video_path
+        self.model = model
+        self.max_retries = 5
+        self.memory: List[Dict] = []
 
-# THE MISSION: Extreme strictness to prevent the AI from "guessing" what's in the video.
-SYSTEM_PROMPT = """
-YOU ARE THE SPATIAL-CORTEX VISION AGENT. YOU ARE CURRENTLY BLIND.
-YOU HAVE NO KNOWLEDGE OF THE VIDEO CONTENT UNTIL YOU CALL A TOOL.
-
-STRICT RULES:
-1. NEVER guess timestamps or confidence scores.
-2. If the user asks a question about the video, your ONLY valid response is a tool call.
-3. Use 'search_event' to "see" specific objects like 'person' or 'car'.
-4. Do not provide a text answer until AFTER you have tool results.
-
-MANDATORY OUTPUT FORMAT (JSON ONLY):
-{
-  "tool": "search_event",
-  "parameters": {
-    "target_object": "person",
-    "skip_seconds": 1
-  }
-}
-"""
-
-def run_agent_loop(user_query, video_file):
-    """
-    Connects the LLM 'Brain' to the Vision 'Tools'.
-    """
-    video_path = os.path.join("test-videos", video_file)
-    
-    # Check if video exists before starting
-    if not os.path.exists(video_path):
-        return f"Error: Video file not found at {video_path}"
-
-    print(f"\n🧠 Agent is thinking about your request...")
-    
-    # PHASE 1: BRAIN DECIDES WHICH TOOL TO USE
-    response = ollama.chat(
-        model=MODEL,
-        messages=[
-            {'role': 'system', 'content': SYSTEM_PROMPT},
-            {'role': 'user', 'content': user_query}
-        ],
-        format='json'
-    )
-    
-    raw_content = response['message']['content']
-    print(f"🤖 Brain's Plan: {raw_content}")
-    
-    try:
-        decision = json.loads(raw_content)
-    except json.JSONDecodeError:
-        return "Error: Brain output invalid JSON. Try again."
-
-    # PHASE 2: EXECUTE THE VISION TOOL
-    if "search_event" in raw_content.lower():
-        # Get target object and normalize (e.g., 'people' -> 'person')
-        target = decision.get('parameters', {}).get('target_object', 'person').lower()
-        if "person" in target or "people" in target: target = "person"
-        if "car" in target: target = "car"
+    def _generate_prompt(self) -> str:
+        return """
+        You are an autonomous Construction Site Auditor. You use a 'Cycle of Thought' to verify site safety and progress.
         
-        print(f"🎬 [ACTION] Scanning video for '{target}'...")
-        
-        # This calls the YOLO + Motion logic from tools.py
-        results = search_event(video_path, target_object=target, skip_seconds=1)
-        
-        # PHASE 3: BRAIN SUMMARIZES DATA FOR HUMAN
-        print(f"📝 [REPORT] Generating human-readable summary...")
-        
-        # We give the raw numbers to the LLM and tell it to be a professional analyst
-        summary_prompt = f"""
-        User Query: "{user_query}"
-        Detection Results: {results}
-        
-        TASK:
-        1. Round timestamps to the nearest whole second.
-        2. If detections are continuous (e.g., 1s, 2s, 3s), summarize them as a range (e.g., "from 1s to 20s").
-        3. Provide a concise, professional answer based ONLY on the detection results.
+        AVAILABLE TOOLS:
+        - search_objects(target_object: str): Returns timestamps where an object is detected.
+        - analyze_state(timestamp_sec: int, question: str): Visual inspection of a specific frame using VQA.
+        - count_unique_objects(target: str): Tracking-based counting for logistics.
+        - check_progress(): High-level comparison of site changes.
+
+        INSTRUCTIONS:
+        1. Analyze the user request.
+        2. If you need data, pick a tool.
+        3. If you have the tool's result, decide if you need another tool or can answer.
+        4. ALWAYS respond in valid JSON.
+
+        OUTPUT FORMAT:
+        {
+            "thought": "Your internal reasoning",
+            "tool": "tool_name or 'none'",
+            "parameters": {},
+            "final_answer": "Only provide this if you have sufficient data"
+        }
         """
-        
-        final_report = ollama.chat(
-            model=MODEL,
-            messages=[
-                {'role': 'system', 'content': "You are a professional security analyst. Be factual and helpful."},
-                {'role': 'user', 'content': summary_prompt}
-            ]
-        )
-        return final_report['message']['content']
-    
-    else:
-        return f"Agent decided not to search. Message: {raw_content}"
 
+    def run(self, user_query: str):
+        print(f"🎬 Initializing Agentic Flow for: '{user_query}'")
+        self.memory.append({"role": "user", "content": user_query})
+
+        for i in range(self.max_retries):
+            # 1. THE REASONING STEP (The "Node")
+            response = ollama.chat(
+                model=self.model,
+                format="json",
+                messages=[
+                    {"role": "system", "content": self._generate_prompt()},
+                    *self.memory
+                ]
+            )
+            
+            content = json.loads(response['message']['content'])
+            thought = content.get("thought", "")
+            tool = content.get("tool", "none")
+            
+            print(f"\n🧠 [Cycle {i+1}] Thought: {thought}")
+
+            # 2. THE TERMINATION STEP (The "Edge")
+            if content.get("final_answer"):
+                print(f"🏁 MISSION COMPLETE")
+                return content["final_answer"]
+
+            # 3. THE ACTION STEP (The "Action")
+            if tool != "none":
+                params = content.get("parameters", {})
+                print(f"🛠️  Executing: {tool}({params})")
+                
+                observation = self._execute_tool(tool, params)
+                print(f"👁️  Observation: {observation}")
+                
+                # Update memory with the loop's finding
+                self.memory.append({"role": "assistant", "content": json.dumps(content)})
+                self.memory.append({"role": "user", "content": f"Observation: {observation}"})
+            else:
+                break
+
+        return "Agent failed to reach a conclusion within max cycles."
+
+    def _execute_tool(self, name: str, params: Dict):
+        try:
+            if name == "search_objects":
+                return search_objects(self.video_path, **params)
+            elif name == "analyze_state":
+                return analyze_state(self.video_path, **params)
+            elif name == "count_unique_objects":
+                return count_unique_objects(self.video_path, **params)
+            elif name == "check_progress":
+                return check_progress(self.video_path)
+            return "Tool not found."
+        except Exception as e:
+            return f"Tool Execution Error: {str(e)}"
+
+# --- BOOTSTRAP ---
 if __name__ == "__main__":
-    # The specific file we are testing
-    target_video = "VIRAT_S_010204_05_000856_000890.mp4"
-    user_question = "At what times do people appear in the footage?"
+    # Ensure your video exists in the directory
+    site_agent = SpatialCortexAgent(r"test-videos\8598744-uhd_3840_2160_30fps.mp4")
     
-    print("="*50)
-    print(f"SPATIAL-CORTEX AGENT ONLINE")
-    print("="*50)
+    # Example Complex Query
+    task = "Find where the cement truck is, check if the driver is wearing a helmet, and tell me if the unloading is finished."
     
-    result = run_agent_loop(user_question, target_video)
-    
-    print("\n" + "="*30)
-    print("FINAL AGENT RESPONSE:")
-    print(result)
-    print("="*30)
+    final_report = site_agent.run(task)
+    print("\n" + "="*50)
+    print("SITE AUDIT REPORT:")
+    print(final_report)
