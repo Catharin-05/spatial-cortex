@@ -1,7 +1,18 @@
-ultralytics
-numpy
-opencv-python
-onnxruntime
-onnx
-ollama
-streamlit
+# Core AI / LLM
+ollama                  # Local LLM runtime client (llama3.2, llava)
+
+# Object Detection & Tracking
+ultralytics             # YOLOv8 — detection, tracking (ByteTrack), and ONNX export
+
+# ONNX Edge Inference
+onnxruntime             # CPU inference for the exported yolov8n.onnx model
+onnx                    # ONNX model utilities (used by helpers/optimize_model.py)
+
+# Video & Image Processing
+opencv-python           # Frame extraction, motion detection (absdiff), VideoCapture
+
+# Numerical Computing
+numpy                   # Array ops used by OpenCV and Ultralytics internals
+
+# Web UI
+streamlit               # Interactive audit dashboard (app.py)
